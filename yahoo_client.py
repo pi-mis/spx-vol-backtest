@@ -43,6 +43,11 @@ import numpy as np
 from pathlib import Path
 
 from config import VXX_FILE, SPY_FILE
+from pathlib import Path
+import re
+
+# Additional files for eVRP filter and short-vol execution
+SVXY_FILE = Path(str(SPY_FILE).replace("spy.csv", "svxy.csv"))
 
 _BASE = "https://query1.finance.yahoo.com/v8/finance/chart"
 
@@ -160,9 +165,39 @@ def download_spy(verbose: bool = True) -> pd.Series:
     return spy.rename("spy")
 
 
+def download_svxy(verbose: bool = True) -> pd.Series:
+    """
+    Download SVXY — ProShares Short VIX Short-Term Futures ETF (−0.5x).
+    Available from October 2011.
+
+    Why SVXY instead of shorting VXX:
+      Shorting VXX requires borrowing shares (borrow cost ~2-5%/yr) and
+      your P&L is non-linear (short position grows as VXX falls).
+      SVXY is purpose-built to capture the short-vol carry — it resets
+      daily to maintain constant −0.5x exposure and has lower operational
+      friction. Zarattini et al. use this type of instrument.
+    """
+    if verbose:
+        print("  Downloading SVXY from Yahoo Finance ...",
+              end=" ", flush=True)
+    svxy = _download_yahoo("SVXY", verbose=False)
+    svxy.rename("svxy").to_frame().to_csv(SVXY_FILE, index_label="date")
+    if verbose:
+        print(f"done  ({len(svxy)} rows, "
+              f"{svxy.index[0].date()} → {svxy.index[-1].date()})")
+    return svxy.rename("svxy")
+
+
 def download_all(verbose: bool = True) -> pd.DataFrame:
     if verbose:
         print("\n── Downloading ETN/ETF prices from Yahoo Finance ───────")
-    vxx = download_vxx_stitched(verbose)
-    spy = download_spy(verbose)
-    return pd.DataFrame({"vxx": vxx, "spy": spy}).sort_index()
+    vxx  = download_vxx_stitched(verbose)
+    svxy = download_svxy(verbose)
+    spy  = download_spy(verbose)
+
+    # Deduplicate each series before joining
+    vxx  = vxx.loc[~vxx.index.duplicated(keep="last")]
+    svxy = svxy.loc[~svxy.index.duplicated(keep="last")]
+    spy  = spy.loc[~spy.index.duplicated(keep="last")]
+
+    return pd.DataFrame({"vxx": vxx, "svxy": svxy, "spy": spy}).sort_index()

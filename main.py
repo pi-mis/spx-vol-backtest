@@ -35,7 +35,7 @@ from cboe_client    import download_all as download_cboe
 from yahoo_client   import download_all as download_yahoo
 from nelson_siegel  import fit_ns_panel
 from arima_forecaster import rolling_beta_forecasts, reconstruct_vix_forecast
-from signals        import generate_signals
+from signals        import generate_signals, compute_evrp
 from backtest       import run_backtest, compute_metrics, plot_results
 
 
@@ -130,16 +130,19 @@ def main(plot: bool = True):
     # ── Step 5: Generate signals ──────────────────────────────────────────────
     _step(5, 6, "Generate trading signals")
     _note(
-        f"Signal = forecasted VIX (30d) − current VIX. "
-        f"If spread < −{SIGNAL_THRESHOLD} AND contango (VIX<VIX3M) → Short VXX (full). "
-        f"If spread > +{SIGNAL_THRESHOLD} AND backwardation → Long VXX (full). "
-        f"Conflicting signals (half size). |spread| ≤ {SIGNAL_THRESHOLD} → Flat. "
-        f"Size = VIX/100. Rebalancing threshold ±2%."
+        f"Three filters combined: "
+        f"(1) NS spread < -{SIGNAL_THRESHOLD} → forecast predicts vol falling. "
+        f"(2) VIX < VIX3M → contango confirms normal market. "
+        f"(3) eVRP = VIX − 10d realized vol of SPY > 0 → premium exists. "
+        f"All three must agree for a full short. "
+        f"Long vol only when spread > +{SIGNAL_THRESHOLD}, backwardation, and eVRP ≤ 0. "
+        f"Execution: short vol via SVXY, long vol via VXX."
     )
     signals_df = generate_signals(
         vix=combined["vix"],
         vix3m=combined["vix3m"],
         vix_forecast=vix_forecast,
+        spy_prices=combined["spy"],
         verbose=True,
     )
 
@@ -152,11 +155,11 @@ def main(plot: bool = True):
     )
     bt = run_backtest(
         signals_df=signals_df,
-        vxx=combined["vxx"],
-        spy=combined["spy"],
+        combined=combined,
         verbose=True,
     )
-    bt["vix_forecast"] = vix_forecast.loc[~vix_forecast.index.duplicated(keep="last")]  # attach for chart
+    bt["vix_forecast"] = vix_forecast.loc[~vix_forecast.index.duplicated(keep="last")]
+    bt["evrp"]         = signals_df["evrp"]
 
     metrics = compute_metrics(bt)
 

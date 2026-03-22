@@ -54,5 +54,10 @@ REBAL_THRESHOLD    = 0.02
 # Transaction costs in % of trade value (0.05% = 5 bps, same as the paper)
 TRANSACTION_COST_PCT = 0.0005
 
-# Start date for backtest (VIX3M available from late 2007)
-BACKTEST_START = "2008-01-01"
+# Start date for backtest.
+# SVXY was restructured from -1x to -0.5x on March 5, 2018 after Volmageddon.
+# Starting from 2019-01-01 ensures:
+#   - SVXY is consistently -0.5x for the entire backtest period
+#   - Includes COVID 2020 and the 2022 bear market as real stress tests
+#   - All P&L uses real prices, no proxies, no structural breaks
+BACKTEST_START = "2019-01-01"
