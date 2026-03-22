@@ -58,9 +58,9 @@ def run_backtest(
     -------
     DataFrame with full daily P&L breakdown.
     """
-    # Daily returns
-    vxx_ret = vxx.pct_change()
-    spy_ret = spy.pct_change()
+    # Daily returns (fill_method=None avoids pandas FutureWarning)
+    vxx_ret = vxx.pct_change(fill_method=None)
+    spy_ret = spy.pct_change(fill_method=None)
 
     bt = signals_df.copy()
     bt["vxx_ret"] = vxx_ret
@@ -82,8 +82,9 @@ def run_backtest(
     # Compounded equity curve
     bt["equity"] = (1 + bt["net_pnl"]).cumprod()
 
-    # SPY benchmark (buy and hold)
-    bt["spy_equity"] = (1 + bt["spy_ret"].fillna(0)).cumprod()
+    # SPY benchmark (buy and hold, normalised to 1 at backtest start)
+    spy_ret_clean = bt["spy_ret"].fillna(0)
+    bt["spy_equity"] = (1 + spy_ret_clean).cumprod()
 
     # Drawdown
     bt["peak"]     = bt["equity"].cummax()
@@ -145,8 +146,10 @@ def compute_metrics(
 
     # SPY benchmark
     spy_ret    = bt["spy_ret"].dropna()
-    spy_total  = float((1 + spy_ret).prod() - 1)
-    spy_cagr   = (1 + spy_total) ** (1 / n_years) - 1 if n_years > 0 else np.nan
+    spy_equity = (1 + spy_ret).cumprod()
+    spy_total  = float(spy_equity.iloc[-1] - 1)
+    spy_years  = len(spy_ret) / annual_days
+    spy_cagr   = (1 + spy_total) ** (1 / spy_years) - 1 if spy_years > 0 else np.nan
     spy_vol    = spy_ret.std() * np.sqrt(annual_days)
     spy_sharpe = spy_cagr / spy_vol if spy_vol > 0 else np.nan
 
