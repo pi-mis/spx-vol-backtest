@@ -1,0 +1,17 @@
+# Data — stays local, never pushed
+data/
+
+# Output charts
+*.png
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Mac
+.DS_Store
+
+# Virtual environments
+venv/
+.venv/
