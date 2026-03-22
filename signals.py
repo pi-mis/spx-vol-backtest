@@ -59,6 +59,11 @@ def generate_signals(
       vix, vix3m, vix_forecast, spread, contango,
       raw_direction, raw_size, raw_position, effective_pos, direction, size
     """
+    # Remove duplicate dates before joining (can arise from VXX stitching)
+    vix          = vix.loc[~vix.index.duplicated(keep="last")]
+    vix3m        = vix3m.loc[~vix3m.index.duplicated(keep="last")]
+    vix_forecast = vix_forecast.loc[~vix_forecast.index.duplicated(keep="last")]
+
     df = pd.DataFrame({
         "vix":          vix,
         "vix3m":        vix3m,
@@ -73,25 +78,35 @@ def generate_signals(
     raw_dir  = pd.Series(0.0, index=df.index)
     raw_size = pd.Series(0.0, index=df.index)
 
-    # Full conviction: forecast and term structure agree
+    # Case 1: forecast lower + contango → Short full conviction
     mask_short_full = (df["spread"] < -SIGNAL_THRESHOLD) & df["contango"]
+
+    # Case 2: forecast lower + backwardation → Short half (conflicting)
+    mask_short_half = (df["spread"] < -SIGNAL_THRESHOLD) & ~df["contango"]
+
+    # Case 3: forecast higher + backwardation → Long full conviction
+    # (term structure already inverted, model confirms stress → long vol)
     mask_long_full  = (df["spread"] >  SIGNAL_THRESHOLD) & ~df["contango"]
 
-    # Half conviction: forecast and term structure conflict
-    mask_short_half = (df["spread"] < -SIGNAL_THRESHOLD) & ~df["contango"]
-    mask_long_half  = (df["spread"] >  SIGNAL_THRESHOLD) & df["contango"]
+    # Case 4: forecast higher + contango → FLAT
+    # The NS model predicts vol will rise but the term structure is normal
+    # (contango). In practice, long VXX in contango is chronically loss-making
+    # because the negative carry from rolling front-month futures erodes returns
+    # faster than the rare vol spikes can compensate.
+    # This is the key asymmetry vs the original code: we suppress long signals
+    # in contango entirely, making the strategy correctly short-biased.
+    # mask_long_half_contango → 0 (flat, not traded)
 
     raw_dir[mask_short_full]  = -1.0
     raw_size[mask_short_full] = base_size[mask_short_full]
 
-    raw_dir[mask_long_full]   =  1.0
-    raw_size[mask_long_full]  = base_size[mask_long_full]
-
     raw_dir[mask_short_half]  = -1.0
     raw_size[mask_short_half] = 0.5 * base_size[mask_short_half]
 
-    raw_dir[mask_long_half]   =  1.0
-    raw_size[mask_long_half]  = 0.5 * base_size[mask_long_half]
+    raw_dir[mask_long_full]   =  1.0
+    raw_size[mask_long_full]  = base_size[mask_long_full]
+
+    # Case 4 (spread > +t AND contango) → stays at 0 (flat) by default
 
     df["raw_direction"] = raw_dir
     df["raw_size"]      = raw_size
@@ -112,10 +127,10 @@ def generate_signals(
 
     if verbose:
         n = len(df)
-        n_sf  = mask_short_full.reindex(df.index, fill_value=False).sum()
-        n_lf  = mask_long_full.reindex(df.index, fill_value=False).sum()
-        n_sh  = mask_short_half.reindex(df.index, fill_value=False).sum()
-        n_lh  = mask_long_half.reindex(df.index, fill_value=False).sum()
+        n_sf   = mask_short_full.reindex(df.index, fill_value=False).sum()
+        n_sh   = mask_short_half.reindex(df.index, fill_value=False).sum()
+        n_lf   = mask_long_full.reindex(df.index, fill_value=False).sum()
+        n_lhc  = ((df["spread"] > SIGNAL_THRESHOLD) & df["contango"]).sum()
         n_flat = (df["raw_position"] == 0).sum()
 
         print(f"\n  Raw signal breakdown  (threshold=±{SIGNAL_THRESHOLD}):")
@@ -125,10 +140,8 @@ def generate_signals(
               f"{n_sh:4d}  ({n_sh/n*100:.1f}%)")
         print(f"    Long  full  (spread>+t, backwardation): "
               f"{n_lf:4d}  ({n_lf/n*100:.1f}%)")
-        print(f"    Long  half  (spread>+t, contango)     : "
-              f"{n_lh:4d}  ({n_lh/n*100:.1f}%)")
-        print(f"    Flat                                  : "
-              f"{n_flat:4d}  ({n_flat/n*100:.1f}%)")
+        print(f"    FLAT        (spread>+t, contango)     : "
+              f"{n_lhc:4d}  ({n_lhc/n*100:.1f}%)  ← suppressed (carry)")
 
         after_short = (df["direction"] == -1).sum()
         after_long  = (df["direction"] ==  1).sum()

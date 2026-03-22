@@ -55,7 +55,13 @@ _session.headers.update({
 def _download_yahoo(ticker: str, verbose: bool) -> pd.Series:
     """Download full daily adjusted close history for a ticker."""
     url    = f"{_BASE}/{ticker}"
-    params = {"interval": "1d", "range": "max", "events": "history"}
+    # Use period1=0 (unix epoch) to request maximum history
+    params = {
+        "interval": "1d",
+        "period1":  "0",          # from unix epoch = maximum history
+        "period2":  "9999999999", # far future
+        "events":   "history",
+    }
 
     r = _session.get(url, params=params, timeout=20)
     r.raise_for_status()
@@ -66,8 +72,8 @@ def _download_yahoo(ticker: str, verbose: bool) -> pd.Series:
     closes     = result["indicators"]["adjclose"][0]["adjclose"]
 
     df = pd.DataFrame({
-        "date":   pd.to_datetime(timestamps, unit="s", utc=True),
-        "close":  closes,
+        "date":  pd.to_datetime(timestamps, unit="s", utc=True),
+        "close": closes,
     })
     df["date"] = df["date"].dt.date
     df = (df.dropna()

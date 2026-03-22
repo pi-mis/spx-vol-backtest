@@ -121,8 +121,9 @@ def main(plot: bool = True):
     )
     forecasts_df = rolling_beta_forecasts(betas_df, verbose=True)
 
-    median_lam   = float(betas_df["lam"].median())
-    print(f"\n  Median λ = {median_lam:.3f} (used to reconstruct VIX forecast)")
+    # Use the fixed lambda from the NS panel (all rows have the same value)
+    median_lam = float(betas_df["lam"].iloc[0])
+    print(f"\n  λ = {median_lam} (fixed, from NS panel)")
 
     vix_forecast = reconstruct_vix_forecast(forecasts_df, median_lam)
 
@@ -155,7 +156,7 @@ def main(plot: bool = True):
         spy=combined["spy"],
         verbose=True,
     )
-    bt["vix_forecast"] = vix_forecast  # attach for chart
+    bt["vix_forecast"] = vix_forecast.loc[~vix_forecast.index.duplicated(keep="last")]  # attach for chart
 
     metrics = compute_metrics(bt)
 

@@ -58,6 +58,10 @@ def run_backtest(
     -------
     DataFrame with full daily P&L breakdown.
     """
+    # Remove duplicate dates (can arise from VXX stitching)
+    vxx = vxx.loc[~vxx.index.duplicated(keep="last")]
+    spy = spy.loc[~spy.index.duplicated(keep="last")]
+
     # Daily returns (fill_method=None avoids pandas FutureWarning)
     vxx_ret = vxx.pct_change(fill_method=None)
     spy_ret = spy.pct_change(fill_method=None)
@@ -144,14 +148,19 @@ def compute_metrics(
     gl = pnl[pnl < 0].abs().sum()
     pf = gp / gl if gl > 0 else np.nan
 
-    # SPY benchmark
-    spy_ret    = bt["spy_ret"].dropna()
-    spy_equity = (1 + spy_ret).cumprod()
-    spy_total  = float(spy_equity.iloc[-1] - 1)
-    spy_years  = len(spy_ret) / annual_days
-    spy_cagr   = (1 + spy_total) ** (1 / spy_years) - 1 if spy_years > 0 else np.nan
-    spy_vol    = spy_ret.std() * np.sqrt(annual_days)
-    spy_sharpe = spy_cagr / spy_vol if spy_vol > 0 else np.nan
+    # SPY benchmark — filter only rows where both strategy and SPY have data
+    spy_mask   = bt["spy_ret"].notna() & bt["net_pnl"].notna()
+    spy_ret    = bt.loc[spy_mask, "spy_ret"]
+
+    if len(spy_ret) == 0:
+        spy_total, spy_cagr, spy_vol, spy_sharpe = np.nan, np.nan, np.nan, np.nan
+    else:
+        spy_equity = (1 + spy_ret).cumprod()
+        spy_total  = float(spy_equity.iloc[-1] - 1)
+        spy_years  = len(spy_ret) / annual_days
+        spy_cagr   = (1 + spy_total) ** (1 / spy_years) - 1 if spy_years > 0 else np.nan
+        spy_vol    = spy_ret.std() * np.sqrt(annual_days)
+        spy_sharpe = spy_cagr / spy_vol if spy_vol > 0 else np.nan
 
     # Correlation with SPY
     corr = pnl.corr(bt["spy_ret"].reindex(pnl.index).fillna(0))

@@ -10,19 +10,26 @@ where:
     L(τ) = (1 − e^{−λτ}) / (λτ)        "slope" loading
     C(τ) = L(τ) − e^{−λτ}               "curvature" loading
     τ     = time to maturity in years
-    λ     = decay parameter (fixed per day, or optimised)
+    λ     = decay parameter
+
+IMPORTANT — fixed vs optimised λ:
+    Diebold-Li (2006) fix λ at a constant chosen to maximise the
+    curvature loading at an intermediate maturity. For our 4 VIX
+    maturities (9d, 30d, 90d, 180d) the optimal fixed λ is around
+    0.5–2.0 (in units of 1/years).
+
+    Using a per-day optimised λ makes β₁, β₂, β₃ incomparable
+    across time — the same curve shape can be represented by wildly
+    different (β, λ) combinations. ARIMA on unstable betas produces
+    garbage forecasts.
+
+    We use FIXED_LAMBDA = 1.5 by default, matching the midpoint of
+    the typical range for short-dated option surfaces.
 
 Factor interpretation:
-    β₁  → long-run vol level        (parallel shift of the curve)
-    β₂  → short-term slope          (negative = upward sloping curve)
-    β₃  → medium-term hump/curvature
-
-Input: today's observed IV at 4 maturities
-    τ = [9/365, 30/365, 90/365, 180/365]
-    IV = [VIX9D, VIX, VIX3M, VIX6M]
-
-Output: β₁, β₂, β₃ extracted via OLS (model is linear in the βs).
-        λ is optimised once per fitting call (Brent's method on RMSE).
+    β₁  → long-run vol level        (parallel shift)
+    β₂  → short-term slope          (negative = upward sloping)
+    β₃  → medium-term hump
 """
 
 import numpy as np
@@ -31,22 +38,35 @@ from scipy.optimize import minimize_scalar
 from scipy.linalg import lstsq
 from typing import NamedTuple
 
+# Fixed decay parameter.
+#
+# How to choose λ:
+#   The curvature loading C(τ,λ) peaks at τ* ≈ 1.7/λ.
+#   We want the peak near the middle of our maturity range (~90 days = 0.247yr).
+#   → λ ≈ 1.7 / 0.247 ≈ 6.9, so λ=10 is appropriate.
+#
+# With λ=1.5 (too small for short maturities):
+#   All four loadings are nearly identical → near-singular design matrix
+#   → β₃ is unidentifiable → std(β) ~ 60–95 → ARIMA on noise.
+#
+# With λ=10 (correct for 9d–180d maturities):
+#   Loadings spread well: L(9d)≈0.89, L(30d)≈0.67, L(90d)≈0.34, L(180d)≈0.20
+#   C peaks near 90d → β₃ is well identified → stable betas → good ARIMA.
+FIXED_LAMBDA = 10.0
+
 
 # ── Factor loadings ───────────────────────────────────────────────────────────
 
 def _L(tau: np.ndarray, lam: float) -> np.ndarray:
-    """Slope loading L(τ) — handles τ → 0 safely."""
     lt = lam * tau
     return np.where(lt < 1e-9, 1.0, (1.0 - np.exp(-lt)) / lt)
 
 
 def _C(tau: np.ndarray, lam: float) -> np.ndarray:
-    """Curvature loading C(τ) = L(τ) − e^{−λτ}."""
     return _L(tau, lam) - np.exp(-lam * tau)
 
 
 def _X(tau: np.ndarray, lam: float) -> np.ndarray:
-    """Design matrix [1, L(τ), C(τ)], shape (n, 3)."""
     return np.column_stack([np.ones_like(tau), _L(tau, lam), _C(tau, lam)])
 
 
@@ -58,16 +78,12 @@ class NSFit(NamedTuple):
     beta3:     float
     lam:       float
     r2:        float
-    rmse:      float   # vol points
+    rmse:      float
     n_points:  int
 
 
-def fit_ns(
-    tau: np.ndarray,
-    iv:  np.ndarray,
-    lam: float,
-) -> NSFit:
-    """OLS fit of Nelson-Siegel for a single cross-section."""
+def fit_ns(tau: np.ndarray, iv: np.ndarray, lam: float) -> NSFit:
+    """OLS fit with fixed λ."""
     X = _X(tau, lam)
     betas, _, _, _ = lstsq(X, iv)
     iv_hat = X @ betas
@@ -76,33 +92,26 @@ def fit_ns(
     r2     = 1.0 - ss_res / ss_tot if ss_tot > 1e-12 else np.nan
     rmse   = float(np.sqrt(ss_res / len(iv)))
     return NSFit(
-        beta1=float(betas[0]),
-        beta2=float(betas[1]),
-        beta3=float(betas[2]),
+        beta1=float(betas[0]), beta2=float(betas[1]), beta3=float(betas[2]),
         lam=lam, r2=r2, rmse=rmse, n_points=len(iv),
     )
 
 
 def fit_ns_optimal(
-    tau:    np.ndarray,
-    iv:     np.ndarray,
+    tau: np.ndarray, iv: np.ndarray,
     bounds: tuple[float, float] = (0.5, 50.0),
 ) -> NSFit:
-    """Find λ that minimises RMSE via Brent, then OLS fit."""
-    res = minimize_scalar(
-        lambda l: fit_ns(tau, iv, l).rmse,
-        bounds=bounds, method="bounded",
-    )
+    """Optimised λ via Brent — use only for diagnostics, not for rolling panel."""
+    res = minimize_scalar(lambda l: fit_ns(tau, iv, l).rmse,
+                          bounds=bounds, method="bounded")
     return fit_ns(tau, iv, res.x)
 
 
 # ── Reconstruct IV at any maturity ────────────────────────────────────────────
 
 def predict_iv(tau: float | np.ndarray, ns: NSFit) -> np.ndarray:
-    """Reconstruct IV at arbitrary maturity/maturities from a fitted NSFit."""
     tau_arr = np.atleast_1d(tau)
-    return (_X(tau_arr, ns.lam) @
-            np.array([ns.beta1, ns.beta2, ns.beta3]))
+    return _X(tau_arr, ns.lam) @ np.array([ns.beta1, ns.beta2, ns.beta3])
 
 
 # ── Rolling panel fit ─────────────────────────────────────────────────────────
@@ -110,6 +119,7 @@ def predict_iv(tau: float | np.ndarray, ns: NSFit) -> np.ndarray:
 def fit_ns_panel(
     term_structure: pd.DataFrame,
     maturities:     dict[str, float],
+    lam:            float | None = None,
     verbose:        bool = True,
 ) -> pd.DataFrame:
     """
@@ -117,27 +127,29 @@ def fit_ns_panel(
 
     Parameters
     ----------
-    term_structure : DataFrame with columns matching keys of `maturities`
-                     and daily DatetimeIndex.
-                     Rows with fewer than 3 non-NaN values are skipped.
-    maturities     : dict mapping column names → τ in years
-                     e.g. {"vix9d": 9/365, "vix": 30/365, ...}
-    verbose        : print progress
-
-    Returns
-    -------
-    DataFrame indexed by date with columns:
-        beta1, beta2, beta3, lam, r2, rmse, n_points
+    lam : fixed λ to use. If None, uses FIXED_LAMBDA (recommended).
+          Pass a specific value to override. Set to -1 to use per-day
+          optimisation (not recommended — produces unstable betas).
     """
-    cols = list(maturities.keys())
+    use_lam   = FIXED_LAMBDA if lam is None else lam
+    use_fixed = (lam != -1)
+
+    if verbose:
+        if use_fixed:
+            print(f"  Using fixed λ = {use_lam}  "
+                  f"(stable betas, ARIMA-ready)")
+        else:
+            print(f"  Using per-day optimised λ  "
+                  f"(diagnostic mode only)")
+
+    cols     = list(maturities.keys())
     tau_full = np.array([maturities[c] for c in cols])
 
     rows = []
-    n = len(term_structure)
+    n    = len(term_structure)
 
     for i, (date, row) in enumerate(term_structure.iterrows()):
-        # Keep only non-NaN columns
-        mask   = row[cols].notna().values
+        mask = row[cols].notna().values
         if mask.sum() < 3:
             continue
 
@@ -145,9 +157,14 @@ def fit_ns_panel(
         iv_i  = row[cols].values[mask].astype(float)
 
         try:
-            ns = fit_ns_optimal(tau_i, iv_i)
+            if use_fixed:
+                ns = fit_ns(tau_i, iv_i, use_lam)
+            else:
+                ns = fit_ns_optimal(tau_i, iv_i)
+
             if np.isnan(ns.r2) or ns.r2 < 0.5:
                 continue
+
             rows.append({"date": date, **ns._asdict()})
         except Exception:
             continue
@@ -155,8 +172,8 @@ def fit_ns_panel(
         if verbose and (i % 200 == 0 or i == n - 1):
             pct = (i + 1) / n * 100
             print(f"  NS fit: {pct:5.1f}%  ({date.date()})  "
-                  f"β₁={ns.beta1:.2f}  β₂={ns.beta2:.2f}  "
-                  f"β₃={ns.beta3:.2f}  λ={ns.lam:.2f}  R²={ns.r2:.3f}")
+                  f"β₁={ns.beta1:6.2f}  β₂={ns.beta2:6.2f}  "
+                  f"β₃={ns.beta3:6.2f}  R²={ns.r2:.3f}")
 
     if not rows:
         raise ValueError("No valid NS fits produced.")
@@ -166,5 +183,8 @@ def fit_ns_panel(
     if verbose:
         print(f"\n  ✓ {len(df)} daily NS fits  "
               f"({df.index[0].date()} → {df.index[-1].date()})")
+        print(f"  β₁: mean={df.beta1.mean():.2f}  std={df.beta1.std():.2f}")
+        print(f"  β₂: mean={df.beta2.mean():.2f}  std={df.beta2.std():.2f}")
+        print(f"  β₃: mean={df.beta3.mean():.2f}  std={df.beta3.std():.2f}")
 
     return df
